@@ -1,298 +1,194 @@
 import time
-import json
-import os
 import csv
+import re
 import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By
+from bs4 import BeautifulSoup
 
+class SimpleHHParser:
+    def __init__(self, url="https://hh.ru/vacancies/barista", max_pages=8):
+        self.url = url
+        self.max_pages = max_pages
+        self.data = []
+        self.driver = None
 
-class YandexMenuParser:
-    def __init__(self):
-        # Настройки браузера
-        options = uc.ChromeOptions()
-        options.add_argument('--lang=ru')
-        options.add_argument('--no-sandbox')
+    def run(self):
+        #Основная функция для запуска парсера
+        try:
+            # Настраиваем браузер
+            options = uc.ChromeOptions()
+            options.add_argument("--window-size=1920,1080")
+            self.driver = uc.Chrome(options=options, use_subprocess=True)
+            print("Браузер успешно запущен")
 
-        # Запуск браузера
-        self.driver = uc.Chrome(options=options)
-        self.results_dir = "results"
+            # Открываем сайт
+            self.driver.get(self.url)
+            print(f"Открыли: {self.url}")
 
-        # Папка для результатов
-        if not os.path.exists(self.results_dir):
-            os.makedirs(self.results_dir)
+            # Ждём, если появится капча
+            print("\n" + "="*50)
+            print("Пройди капчу")
+            print("="*50)
+            input()
 
-        # Пути к файлам
-        self.combined_file = os.path.join(self.results_dir, "all_menus.json")
-        self.csv_file = os.path.join(self.results_dir, "menu_items.csv")
+            # Обрабатываем страницы
+            current_page = 1
+            while current_page <= self.max_pages:
 
-        # Загружаем или создаём JSON
-        if os.path.exists(self.combined_file):
-            with open(self.combined_file, 'r', encoding='utf-8') as f:
-                self.all_menus = json.load(f)
-        else:
-            self.all_menus = {}
-
-        # Создаём CSV с заголовками, если нужно
-        if not os.path.exists(self.csv_file):
-            with open(self.csv_file, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(['name', 'price', 'restaurant_name'])
-
-    def extract_menu(self, url):
-        # Получаем ID ресторана из ссылки
-        restaurant_id = url.split('/')[-1].split('?')[0]
-
-        # Сопоставляем ID с названием (если не нашли на странице)
-        restaurant_name_map = {
-            "138220492294": "Pravda Coffee",
-            "142576836285": "Surf Coffee"
-        }
-
-        # Открываем страницу
-        self.driver.get(url)
-
-        # Если появилась капча — отправляется обратно мне - тут пользовалась чатгпт
-        if "captcha" in self.driver.current_url:
-            input("Обнаружена капча. Реши её и нажми Enter")
-
-        # Пытаемся открыть вкладку с меню
-        time.sleep(2)
-        menu_tab_selectors = [
-            ".tabs-select-view__title._name_menu",
-            "div[aria-label='Меню, ']",
-            ".tabs-select-view__title[aria-label='Меню, ']",
-            "a.tabs-select-view__label[href*='/menu/']"
-        ]
-
-        menu_tab = None
-        for selector in menu_tab_selectors:
-            try:
-                menu_tab = self.driver.find_element(By.CSS_SELECTOR, selector)
-                if menu_tab:
+                # Получаем все вакансии на текущей странице
+                vacancies = self._parse_vacancies()
+                if not vacancies:
                     break
-            except:
+
+                print(f"Найдено {len(vacancies)} вакансий на странице {current_page}") #оставила для отслеживания работы кода
+                self.data.extend(vacancies)
+
+                # переходим на следующую страницу
+                current_page += 1
+                if current_page <= self.max_pages:
+                    next_url = f"{self.url}?page={current_page-1}"
+                    self.driver.get(next_url)
+                    time.sleep(2)
+
+            # Сохраняем данные в CSV, если они есть
+            if self.data:
+                self._save_to_csv("vacancies.csv")
+                print(f"Сохранено {len(self.data)} вакансий")
+            else:
+                print("Данных нет")
+
+            return self.data
+
+        except Exception as e:
+            print(f"Ошибка: {e}")
+        finally:
+            if self.driver:
+                self.driver.quit()
+
+    def _save_to_csv(self, filename):
+        #Сохраняем данные в CSV
+        if not self.data:
+            return
+
+        keys = self.data[0].keys()
+
+        with open(filename, 'w', newline='', encoding='utf-8') as output_file:
+            dict_writer = csv.DictWriter(output_file, keys)
+            dict_writer.writeheader()
+            dict_writer.writerows(self.data)
+
+    def _salary_in_range(self, salary_str):
+        #Тут чищу зарплаты, потому что они указаны по-разному. Беру 12-часовой рабочий день и зарплату только за месяц
+        # Если зарплата не указана, оставляем вакансию
+        if salary_str == "Не указана":
+            return True
+
+        #Заменяем неразрывные пробелы на обычные пробелы
+        salary_cleaned = salary_str.replace("\xa0", " ")
+        # Ищем все числа в строке зарплаты (например, "от 70 000 до 100 000 руб.")
+        numbers = re.findall(r'\d[\d\s]*\d', salary_cleaned)
+
+        try:
+            numbers = [int(num.replace(" ", "")) for num in numbers if num.strip() != ""]
+        except Exception as e:
+            print(f"Ошибка конвертации зарплаты '{salary_str}': {e}")
+            return True
+
+        if not numbers:
+            return True  # Если не нашли чисел, оставляем вакансию
+
+        lower_limit = 50000
+        upper_limit = 150000
+        salary_str_lower = salary_cleaned.lower()
+
+        # Если зарплата указана как диапазон "от ... до ..."
+        if "от" in salary_str_lower and "до" in salary_str_lower:
+            if len(numbers) >= 2:
+                min_sal = numbers[0]
+                max_sal = numbers[1]
+                return (min_sal >= lower_limit and max_sal <= upper_limit)
+            else:
+                return False
+        # Если указана зарплата "от ..."
+        elif "от" in salary_str_lower:
+            min_sal = numbers[0]
+            return (min_sal >= lower_limit and min_sal <= upper_limit)
+        # Если указана зарплата "до ..."
+        elif "до" in salary_str_lower:
+            max_sal = numbers[0]
+            return (max_sal >= lower_limit and max_sal <= upper_limit)
+        else:
+            # Если зарплата указана одним числом, проверяем его
+            sal = numbers[0]
+            return (sal >= lower_limit and sal <= upper_limit)
+
+    def _parse_vacancies(self):
+
+        html = self.driver.page_source
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # Находим ссылки на вакансии
+        vacancy_links = soup.select("a[data-qa='serp-item__title'], a[href*='/vacancy/']")
+
+        if not vacancy_links:
+            return []
+
+        vacancies = []
+
+        for link in vacancy_links:
+            # Для каждой вакансии переходим на страницу с подробностями
+            title = link.text.strip()
+            href = link.get("href", "")
+
+            # Пропускаем, если ссылка кривая или заголовок пустой
+            if not href or title in ["", "На карте"]:
                 continue
 
-        if menu_tab:
-            menu_tab.click()
-            time.sleep(3)
+            vacancy = {"title": title, "link": href}
 
-        # Получаем название ресторана
-        try:
-            restaurant_name = self.driver.find_element(By.CSS_SELECTOR,
-                                                       ".business-card-title-view__title-link").text
-        except:
-            restaurant_name = restaurant_name_map.get(restaurant_id, f"Restaurant {restaurant_id}")
+            try:
+                # Заходим на страницу вакансии
+                print(f"Заходим на вакансию: {title}") #аналогично оставила для отслеживания
+                self.driver.get(href)
+                time.sleep(2)
 
-        # Делаем скриншот страницы (на всякий случай)
-        screenshot_path = os.path.join(self.results_dir, f"{restaurant_id}_screenshot.png")
-        try:
-            self.driver.save_screenshot(screenshot_path)
-        except:
-            pass
+                # Парсим подробности вакансии
+                page_html = self.driver.page_source
+                detail_soup = BeautifulSoup(page_html, 'html.parser')
 
-        # Словарь для меню
-        menu_categories = {}
-        all_menu_items = []
+                # Получаем зарплату
+                # Тут я использовала чатгпт в процессе дебагинга
+                salary_element = detail_soup.select_one("[data-qa='vacancy-salary'], [data-qa*='salary']")
+                if salary_element:
+                    vacancy["salary"] = salary_element.text.strip()
+                else:
+                    vacancy["salary"] = "Не указана"
 
-        try:
-            # Ищем все категории меню
-            category_elements = self.driver.find_elements(By.CSS_SELECTOR,
-                                                          ".business-full-items-grouped-view__category")
+                # Фильтруем вакансии по зарплате
+                if not self._salary_in_range(vacancy["salary"]):
+                    print(f"Пропускаем {title} из-за неподходящей зарплаты: {vacancy['salary']}")
+                    continue
 
-            if not category_elements:
-                menu_items = self.extract_menu_items_from_page()
-                if menu_items:
-                    menu_categories["Menu"] = menu_items
-                    all_menu_items.extend(menu_items)
-            else:
-                for category_element in category_elements:
-                    try:
-                        # Название категории
-                        category_name = category_element.find_element(By.CSS_SELECTOR,
-                                                                      ".business-full-items-grouped-view__title").text
+                # Вынимаем название компании
+                company_element = detail_soup.select_one("[data-qa*='employer-name']")
+                if company_element:
+                    vacancy["company"] = company_element.text.strip()
+                else:
+                    vacancy["company"] = "Не указана"
 
-                        # Элементы в категории
-                        items_container = category_element.find_element(By.CSS_SELECTOR,
-                                                                        ".business-full-items-grouped-view__items")
-                        item_elements = items_container.find_elements(By.CSS_SELECTOR,
-                                                                      ".business-full-items-grouped-view__item")
+                # Вынимаем описание вакансии
+                description_element = detail_soup.select_one("[data-qa='vacancy-description']")
+                if description_element:
+                    vacancy["description"] = description_element.text.strip()
+                else:
+                    vacancy["description"] = ""
 
-                        menu_items = []
-                        for item_element in item_elements:
-                            try:
-                                product_view = item_element.find_element(By.CSS_SELECTOR, ".related-product-view")
-                                name = product_view.find_element(By.CSS_SELECTOR,
-                                                                 ".related-item-photo-view__title").text
+                vacancies.append(vacancy)
 
-                                description = ""
-                                price = ""
-                                volume = ""
+            except Exception as e:
+                print(f"Ошибка при обработке вакансии {title}: {e}")
 
-                                try:
-                                    description = product_view.find_element(By.CSS_SELECTOR,
-                                                                            ".related-item-photo-view__description").text
-                                except:
-                                    pass
-
-                                try:
-                                    price = product_view.find_element(By.CSS_SELECTOR,
-                                                                      ".related-product-view__price").text
-                                except:
-                                    pass
-
-                                try:
-                                    volume = product_view.find_element(By.CSS_SELECTOR,
-                                                                       ".related-product-view__volume").text
-                                except:
-                                    pass
-
-                                item = {
-                                    "name": name,
-                                    "description": description,
-                                    "price": price,
-                                    "volume": volume
-                                }
-                                menu_items.append(item)
-                                all_menu_items.append(item)
-                            except:
-                                pass
-
-                        if menu_items:
-                            menu_categories[category_name] = menu_items
-                    except:
-                        pass
-        except:
-            pass
-
-        if not menu_categories:
-            print("Меню не найдено")
-
-        # Сохраняем данные по ресторану
-        restaurant_data = {
-            "name": restaurant_name,
-            "url": url,
-            "menu": menu_categories
-        }
-
-        filename = os.path.join(self.results_dir, f"{restaurant_id}.json")
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(restaurant_data, f, ensure_ascii=False, indent=4)
-
-        # Обновляем общий JSON
-        self.all_menus[restaurant_id] = restaurant_data
-        with open(self.combined_file, 'w', encoding='utf-8') as f:
-            json.dump(self.all_menus, f, ensure_ascii=False, indent=4)
-
-        # Сохраняем в CSV
-        self.export_to_csv(all_menu_items, restaurant_name)
-
-        return restaurant_data
-
-    def export_to_csv(self, menu_items, restaurant_name):
-        # Добавляем позиции меню в CSV
-        with open(self.csv_file, 'a', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            for item in menu_items:
-                name_with_volume = item['name']
-                if item['volume']:
-                    name_with_volume = f"{item['name']} ({item['volume']})"
-
-                writer.writerow([
-                    name_with_volume,
-                    item['price'],
-                    restaurant_name
-                ])
-
-    def extract_menu_items_from_page(self):
-        # Альтернативный способ достать позиции меню без категорий
-        selectors = [
-            ".related-product-view",
-            ".business-full-items-grouped-view__photo-item",
-            ".business-features-view__item"
-        ]
-
-        for selector in selectors:
-            items = []
-            elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-            if elements:
-                for element in elements:
-                    try:
-                        name = ""
-                        for name_selector in [".related-item-photo-view__title",
-                                              ".business-features-view__title"]:
-                            try:
-                                name = element.find_element(By.CSS_SELECTOR, name_selector).text
-                                if name:
-                                    break
-                            except:
-                                pass
-
-                        if not name:
-                            continue
-
-                        description = ""
-                        price = ""
-                        volume = ""
-
-                        for desc_selector in [".related-item-photo-view__description",
-                                              ".business-features-view__description"]:
-                            try:
-                                description = element.find_element(By.CSS_SELECTOR, desc_selector).text
-                                if description:
-                                    break
-                            except:
-                                pass
-
-                        for price_selector in [".related-product-view__price"]:
-                            try:
-                                price = element.find_element(By.CSS_SELECTOR, price_selector).text
-                                if price:
-                                    break
-                            except:
-                                pass
-
-                        for vol_selector in [".related-product-view__volume"]:
-                            try:
-                                volume = element.find_element(By.CSS_SELECTOR, vol_selector).text
-                                if volume:
-                                    break
-                            except:
-                                pass
-
-                        items.append({
-                            "name": name,
-                            "description": description,
-                            "price": price,
-                            "volume": volume
-                        })
-                    except:
-                        pass
-
-            if items:
-                return items
-
-        return []
-
-    def close(self):
-        # Закрываем браузер
-        self.driver.quit()
-
-
-def main():
-    parser = YandexMenuParser()
-
-    try:
-        urls = [
-            "https://yandex.ru/maps/org/pravda_kofe/138220492294?si=ptb4ex6crfjmmw9j7x08pnzbb8",
-            "https://yandex.ru/maps/org/surf_coffee_x_roma/142576836285?si=ptb4ex6crfjmmw9j7x08pnzbb8"
-        ]
-
-        for url in urls:
-            parser.extract_menu(url)
-    finally:
-        parser.close()
-
+        return vacancies
 
 if __name__ == "__main__":
-    main()
+    parser = SimpleHHParser()
+    parser.run()
